@@ -13,20 +13,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Show files
+        run: |
+          echo "=== ROOT ==="
+          ls -la
+          echo "=== ZIP FILES ==="
+          find . -maxdepth 3 -iname "*.zip" -ls
+
       - name: Unzip project
         run: |
           mkdir -p unzipped
           ZIP=$(find . -maxdepth 2 -iname "FindDiffOverlay2.zip" | head -n 1)
+
           if [ -z "$ZIP" ]; then
-            echo "No FindDiffOverlay2.zip found"; exit 1
+            echo "No FindDiffOverlay2.zip found"
+            exit 1
           fi
+
+          echo "Unzipping $ZIP into ./unzipped"
           unzip -o "$ZIP" -d ./unzipped
+
+          echo "=== UNZIPPED TOP ==="
+          ls -la ./unzipped
+
           echo "=== UNZIPPED TREE ==="
           find ./unzipped -maxdepth 6 -print | head -n 400
 
       - name: Find project root
         id: root
         run: |
+          echo "=== SEARCH SETTINGS.GRADLE ==="
+          find ./unzipped -maxdepth 6 -iname "settings.gradle*" -print
+
           if [ -f "./unzipped/settings.gradle" ] || [ -f "./unzipped/settings.gradle.kts" ]; then
             PROJECT_DIR="./unzipped"
           else
@@ -56,46 +74,41 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          api-level: 34
-          build-tools: 34.0.0
-          ndk: false
+          packages: |
+            platform-tools
+            platforms;android-34
+            build-tools;34.0.0
 
-      - name: Install Gradle
-        run: |
-          GRADLE_VERSION=8.7
-          wget -q "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -O /tmp/gradle.zip
-          mkdir -p /opt/gradle
-          unzip -q /tmp/gradle.zip -d /opt/gradle
-          echo "/opt/gradle/gradle-${GRADLE_VERSION}/bin" >> $GITHUB_PATH
-          gradle --version
-
-      - name: Fix gradlew line endings
+      - name: Fix gradlew and permissions
         working-directory: ${{ steps.root.outputs.project_dir }}
         run: |
           if [ -f ./gradlew ]; then
             sed -i 's/\r$//' ./gradlew
             chmod +x ./gradlew
-            echo "Fixed gradlew"
+            echo "gradlew fixed"
           else
-            echo "No gradlew, will use installed gradle"
+            echo "No gradlew found, will try system gradle later if needed"
           fi
 
-      - name: Build debug APK (gradlew if present, else gradle)
+      - name: Build debug APK
         working-directory: ${{ steps.root.outputs.project_dir }}
         env:
           ANDROID_HOME: ${{ env.ANDROID_HOME }}
           ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
         run: |
           if [ -x ./gradlew ]; then
-            echo "Using gradlew"
+            echo "Build with gradlew"
             ./gradlew assembleDebug --no-daemon
           else
-            echo "Using installed gradle"
+            echo "Build with system gradle"
             gradle assembleDebug --no-daemon
           fi
 
       - name: Upload APK
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: FindDiff-debug-apk
-          path: ${{ steps.root.outputs.project_dir }}/app/build/outputs/apk/debug/*.apk
+          path: |
+            ${{ steps.root.outputs.project_dir }}/app/build/outputs/apk/debug/*.apk
+            ${{ steps.root.outputs.project_dir }}/*/build/outputs/apk/debug/*.apk
