@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -19,36 +19,51 @@ jobs:
           ls -la
           echo "=== ZIP FILES ==="
           find . -maxdepth 3 -iname "*.zip" -ls
-          echo "=== GRADLEW FILES ==="
-          find . -maxdepth 6 -name "gradlew" -ls
 
       - name: Unzip project
         run: |
+          mkdir -p unzipped
           ZIP=$(find . -maxdepth 2 -iname "FindDiffOverlay2.zip" | head -n 1)
-          if [ -n "$ZIP" ]; then
-            echo "Unzipping $ZIP"
-            unzip -o "$ZIP" -d .
-            rm -f "$ZIP"
-          else
+
+          if [ -z "$ZIP" ]; then
             echo "No FindDiffOverlay2.zip found"
+            exit 1
           fi
 
-          echo "=== AFTER UNZIP ==="
-          ls -la
+          echo "Unzipping $ZIP into ./unzipped"
+          unzip -o "$ZIP" -d ./unzipped
+
+          echo "=== UNZIPPED TOP ==="
+          ls -la ./unzipped
+
+          echo "=== UNZIPPED TREE ==="
+          find ./unzipped -maxdepth 5 -print | head -n 300
 
       - name: Find project root
         id: root
         run: |
-          GW=$(find . -maxdepth 6 -name "gradlew" | grep -v "/build/" | head -n 1)
-          if [ -z "$GW" ]; then
-            echo "ERROR: gradlew not found"
-            exit 1
+          echo "=== SEARCH GRADLEW ==="
+          find ./unzipped -maxdepth 6 -name "gradlew" -print
+
+          echo "=== SEARCH SETTINGS.GRADLE ==="
+          find ./unzipped -maxdepth 6 -iname "settings.gradle*" -print
+
+          # 如果根目录直接有 gradlew
+          if [ -f "./unzipped/gradlew" ]; then
+            PROJECT_DIR="./unzipped"
+          else
+            # 否则找第一个 gradlew，取其目录
+            GW=$(find ./unzipped -maxdepth 6 -name "gradlew" | grep -v "/build/" | head -n 1)
+            if [ -z "$GW" ]; then
+              echo "ERROR: gradlew not found inside unzipped/"
+              find ./unzipped -maxdepth 6 -print | head -n 300
+              exit 1
+            fi
+            PROJECT_DIR=$(dirname "$GW")
           fi
 
-          PROJECT_DIR=$(dirname "$GW")
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Found gradlew at $GW"
-          echo "Project dir: $PROJECT_DIR"
+          echo "Found project dir: $PROJECT_DIR"
           ls -la "$PROJECT_DIR"
 
       - name: Set up JDK 17
@@ -57,35 +72,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK manually
-        uses: actions/setup-java@v4
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
         with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Install Android SDK command line tools
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y wget unzip
-
-          ANDROID_SDK_ROOT=$HOME/android-sdk
-          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
-          cd $ANDROID_SDK_ROOT/cmdline-tools
-
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O cmdline-tools.zip
-          unzip -q cmdline-tools.zip
-          mv cmdline-tools latest
-          rm cmdline-tools.zip
-
-          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
-          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
-
-      - name: Install SDK packages
-        run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          api-level: 34
+          build-tools: 34.0.0
+          ndk: false
 
       - name: Make gradlew executable
         working-directory: ${{ steps.root.outputs.project_dir }}
