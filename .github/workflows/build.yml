@@ -10,6 +10,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    env:
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -20,13 +23,26 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: |
-            platforms;android-34
-            build-tools;34.0.0
-          accept-android-sdk-licenses: true
+      - name: Install Android SDK manually
+        run: |
+          SDK=$ANDROID_SDK_ROOT
+          CMDLINE=$SDK/cmdline-tools/latest/bin/sdkmanager
+
+          echo "=== Accept all SDK licenses ==="
+          yes | $CMDLINE --licenses || true
+
+          echo "=== Install only required packages ==="
+          yes | $CMDLINE \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            "platform-tools" || true
+
+          echo "=== Installed packages ==="
+          $CMDLINE --list_installed || true
+
+          echo "$SDK/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
 
       - name: Find project root
         id: root
