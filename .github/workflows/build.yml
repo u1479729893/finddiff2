@@ -44,40 +44,40 @@ jobs:
           echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
 
-      - name: Find project root
-        id: root
+      - name: Find gradlew
+        id: gw
         run: |
-          if [ -f "project_src/finddiff2/gradlew" ]; then
-            echo "root=project_src/finddiff2" >> "$GITHUB_OUTPUT"
-          elif [ -f "finddiff2/gradlew" ]; then
-            echo "root=finddiff2" >> "$GITHUB_OUTPUT"
-          elif [ -f "project_src/gradlew" ]; then
-            echo "root=project_src" >> "$GITHUB_OUTPUT"
-          else
-            echo "root=." >> "$GITHUB_OUTPUT"
+          echo "Searching for gradlew..."
+          GW=$(find . -maxdepth 5 -name gradlew -type f | head -n 1)
+
+          if [ -z "$GW" ]; then
+            echo "ERROR: gradlew not found!"
+            echo "Repo tree:"
+            ls -R | head -n 200
+            exit 1
           fi
 
-      - name: Show root
-        run: echo "Project root = ${{ steps.root.outputs.root }}"
+          ROOT=$(dirname "$GW")
+          echo "Found gradlew at: $GW"
+          echo "Project root: $ROOT"
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "gw=$GW" >> "$GITHUB_OUTPUT"
 
-      - name: Fix gradlew
-        working-directory: ${{ steps.root.outputs.root }}
-        run: |
-          chmod +x gradlew || true
-          chmod +x gradle/wrapper/gradle-wrapper.jar || true
+          chmod +x "$GW"
+          chmod +x "$ROOT/gradle/wrapper/gradle-wrapper.jar" || true
 
       - name: Build debug APK
-        working-directory: ${{ steps.root.outputs.root }}
+        working-directory: ${{ steps.gw.outputs.root }}
         run: |
           ./gradlew assembleDebug --stacktrace
 
       - name: List outputs
         run: |
-          echo "ROOT=${{ steps.root.outputs.root }}"
-          find "${{ steps.root.outputs.root }}" -name "*debug*.apk" -ls || true
+          echo "ROOT=${{ steps.gw.outputs.root }}"
+          find "${{ steps.gw.outputs.root }}" -name "*debug*.apk" -ls || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: ${{ steps.root.outputs.root }}/app/build/outputs/apk/debug/app-debug.apk
+          path: ${{ steps.gw.outputs.root }}/app/build/outputs/apk/debug/app-debug.apk
