@@ -1,66 +1,52 @@
-name: Build FindDiff APK
+name: build
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  actions: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     env:
       ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show files
-        run: |
-          echo "=== ROOT ==="
-          ls -la
-          echo "=== ZIP FILES ==="
-          find . -maxdepth 3 -iname "*.zip" -ls
-
       - name: Unzip project
         run: |
-          mkdir -p unzipped
-          ZIP=$(find . -maxdepth 2 -iname "FindDiffOverlay2.zip" | head -n 1)
-
-          if [ -z "$ZIP" ]; then
-            echo "No FindDiffOverlay2.zip found"
+          set -e
+          mkdir -p project_src
+          if [ -f app_source.zip ]; then
+            unzip -q -o app_source.zip -d project_src
+          else
+            echo "app_source.zip not found"
             exit 1
           fi
-
-          echo "Unzipping $ZIP into ./unzipped"
-          unzip -o "$ZIP" -d ./unzipped
-
-          echo "=== UNZIPPED TOP ==="
-          ls -la ./unzipped
-
-          echo "=== UNZIPPED TREE ==="
-          find ./unzipped -maxdepth 6 -print | head -n 400
 
       - name: Find project root
         id: root
         run: |
-          if [ -f "./unzipped/settings.gradle" ] || [ -f "./unzipped/settings.gradle.kts" ]; then
-            PROJECT_DIR="./unzipped"
+          set -e
+          cd project_src
+          if [ -f settings.gradle ] || [ -f settings.gradle.kts ]; then
+            echo "root=project_src" >> $GITHUB_OUTPUT
+          elif [ -f app/build.gradle ] || [ -f app/build.gradle.kts ]; then
+            echo "root=project_src" >> $GITHUB_OUTPUT
           else
-            D=$(find ./unzipped -maxdepth 6 -iname "settings.gradle*" | head -n 1 | xargs dirname)
-            if [ -z "$D" ]; then
-              echo "ERROR: settings.gradle not found"
-              find ./unzipped -maxdepth 6 -print | head -n 300
+            ROOT=$(find . -maxdepth 3 -name 'settings.gradle' -o -name 'settings.gradle.kts' | head -n 1 | xargs dirname)
+            if [ -z "$ROOT" ]; then
+              echo "Cannot find Gradle project root"
               exit 1
             fi
-            PROJECT_DIR="$D"
+            echo "root=${ROOT#./}" >> $GITHUB_OUTPUT
           fi
-
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Project dir: $PROJECT_DIR"
-          ls -la "$PROJECT_DIR"
+          echo "PROJECT_ROOT=${{ steps.root.outputs.root }}"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -70,20 +56,20 @@ jobs:
 
       - name: Set up Android SDK manually
         run: |
+          set -e
           SDK=$ANDROID_HOME
-          mkdir -p "$SDK/cmdline-tools/latest"
+          mkdir -p "$SDK/cmdline-tools"
+
           cd "$SDK/cmdline-tools"
-
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
-          unzip -q tools.zip
+          unzip -q -o tools.zip
 
-          # GitHub runner 自带目录有时会是 cmdline-tools/cmdline-tools，整理一下
           if [ -d cmdline-tools ]; then
-            mv cmdline-tools/* latest/
-            rm -rf cmdline-tools
-          else
-            mv bin lib NOTICE.txt source.properties latest/ 2>/dev/null || true
+            rm -rf latest
+            mv cmdline-tools latest
           fi
+
+          ls -la latest/bin
 
           yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses || true
           "$SDK/cmdline-tools/latest/bin/sdkmanager" \
@@ -94,40 +80,30 @@ jobs:
           echo "=== INSTALLED PACKAGES ==="
           "$SDK/cmdline-tools/latest/bin/sdkmanager" --list_installed
 
+          echo "$SDK/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
+
       - name: Fix gradlew and permissions
-        working-directory: ${{ steps.root.outputs.project_dir }}
+        working-directory: project_src/${{ steps.root.outputs.root }}
         run: |
-          if [ -f ./gradlew ]; then
-            sed -i 's/\r$//' ./gradlew
-            chmod +x ./gradlew
-            echo "gradlew fixed"
-          else
-            echo "No gradlew found"
+          set -e
+          if [ ! -f gradlew ]; then
+            echo "No gradlew found, generating wrapper..."
+            gradle wrapper || ./gradlew wrapper || true
           fi
+          chmod +x gradlew || true
+          chmod +x gradle/wrapper/gradle-wrapper.jar || true
 
       - name: Build debug APK
-        working-directory: ${{ steps.root.outputs.project_dir }}
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          ANDROID_SDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}
+        working-directory: project_src/${{ steps.root.outputs.root }}
         run: |
-          if [ -x ./gradlew ]; then
-            echo "Build with gradlew"
-            ./gradlew assembleDebug --no-daemon
-          else
-            echo "No gradlew, installing gradle"
-            wget -q https://services.gradle.org/distributions/gradle-8.7-bin.zip -O /tmp/gradle.zip
-            mkdir -p /opt/gradle
-            unzip -q /tmp/gradle.zip -d /opt/gradle
-            echo "/opt/gradle/gradle-8.7/bin" >> $GITHUB_PATH
-            gradle assembleDebug --no-daemon
-          fi
+          set -e
+          ./gradlew assembleDebug --stacktrace
 
       - name: Upload APK
-        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: FindDiff-debug-apk
+          name: app-debug
           path: |
-            ${{ steps.root.outputs.project_dir }}/app/build/outputs/apk/debug/*.apk
-            ${{ steps.root.outputs.project_dir }}/*/build/outputs/apk/debug/*.apk
+            project_src/${{ steps.root.outputs.root }}/**/build/outputs/apk/debug/*.apk
+            project_src/${{ steps.root.outputs.root }}/**/build/outputs/apk/*/debug/*.apk
