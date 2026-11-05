@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/floating_btn"
+    android:layout_width="60dp"
+    android:layout_height="60dp"
+    android:text="找"
+    android:textColor="#FFFFFF"
+    android:textSize="28sp"
+    android:textStyle="bold"
+    android:gravity="center"
+    android:background="#AA000000"
+    android:clickable="true"
+    android:focusable="true"/>
