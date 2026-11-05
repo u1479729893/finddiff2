@@ -11,84 +11,134 @@ import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.view.Gravity
 import android.view.LayoutInflater
+import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
-import android.widget.ImageView
+import android.widget.TextView
+import android.widget.Toast
 
 class CaptureService : Service() {
 
+    private var mediaProjectionManager: MediaProjectionManager? = null
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
-
-    private lateinit var windowManager: WindowManager
-    private lateinit var floatingView: ImageView
+    private var windowManager: WindowManager? = null
+    private var floatingView: View? = null
 
     private val handler = Handler(Looper.getMainLooper())
+    private var callbackRegistered = false
+
+    private val mediaProjectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            stopCapture()
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    override fun onCreate() {
-        super.onCreate()
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    }
-
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val resultCode = intent?.getIntExtra("resultCode", -1) ?: -1
-        val data = intent?.getParcelableExtra<Intent>("data")
+        val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra("data", Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra("data")
+        }
 
         if (resultCode == -1 || data == null) {
+            Toast.makeText(this, "启动捕获失败：缺少录屏授权", Toast.LENGTH_SHORT).show()
             stopSelf()
             return START_NOT_STICKY
         }
 
-        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = mpm.getMediaProjection(resultCode, data)
+        startForeground(1, createNotification())
 
-        mediaProjection?.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                super.onStop()
-                stopSelf()
-            }
-        }, handler)
+        mediaProjectionManager =
+            getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
-        showFloating()
+        mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, data)
+
+        // 关键：必须先注册 callback，再 start capture
+        if (!callbackRegistered) {
+            mediaProjection?.registerCallback(mediaProjectionCallback, handler)
+            callbackRegistered = true
+        }
+
+        setupFloatingWindow()
         startCapture()
 
         return START_STICKY
     }
 
-    private fun showFloating() {
+    private fun setupFloatingWindow() {
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        val layoutInflater = LayoutInflater.from(this)
+        floatingView = layoutInflater.inflate(R.layout.floating_button, null)
+
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            } else {
+                WindowManager.LayoutParams.TYPE_PHONE
+            },
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                    or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         )
-        params.gravity = Gravity.TOP or Gravity.START
-        params.x = 200
-        params.y = 400
 
-        floatingView = ImageView(this)
-        floatingView.setImageResource(android.R.drawable.ic_menu_search)
-        floatingView.setOnClickListener {
+        params.gravity = Gravity.TOP or Gravity.START
+        params.x = 100
+        params.y = 200
+
+        windowManager?.addView(floatingView, params)
+
+        val btn = floatingView?.findViewById<TextView>(R.id.floating_btn)
+        btn?.setOnClickListener {
             captureOnce()
         }
-        floatingView.setOnLongClickListener {
+
+        btn?.setOnLongClickListener {
             stopSelf()
             true
         }
 
-        windowManager.addView(floatingView, params)
+        var initialX = 0
+        var initialY = 0
+        var initialTouchX = 0f
+        var initialTouchY = 0f
+
+        btn?.setOnTouchListener { v, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x
+                    initialY = params.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = initialX + (event.rawX - initialTouchX).toInt()
+                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    windowManager?.updateViewLayout(floatingView, params)
+                    true
+                }
+                else -> false
+            }
+        }
     }
 
     private fun startCapture() {
         val metrics = resources.displayMetrics
+
         imageReader = ImageReader.newInstance(
             metrics.widthPixels,
             metrics.heightPixels,
@@ -114,7 +164,8 @@ class CaptureService : Service() {
         if (image != null) {
             try {
                 val bitmap = imageToBitmap(image)
-                // TODO: 这里做你原来的“找不同”识别逻辑
+                // TODO: 你后面找茬识别逻辑放这里
+                Toast.makeText(this, "已抓到一帧：${bitmap.width}x${bitmap.height}", Toast.LENGTH_SHORT).show()
             } finally {
                 image.close()
             }
@@ -138,22 +189,39 @@ class CaptureService : Service() {
         return Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
     }
 
-    companion object {
-        fun startService(context: Context, resultCode: Int, data: Intent) {
-            val intent = Intent(context, CaptureService::class.java)
-            intent.putExtra("resultCode", resultCode)
-            intent.putExtra("data", data)
-            context.startForegroundService(intent)
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
+    private fun stopCapture() {
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
-        if (::floatingView.isInitialized) {
-            windowManager.removeView(floatingView)
+    }
+
+    private fun createNotification() =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = android.app.NotificationChannel(
+                "finddiff",
+                "找茬助手",
+                android.app.NotificationManager.IMPORTANCE_LOW
+            )
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            nm.createNotificationChannel(channel)
+
+            android.app.Notification.Builder(this, "finddiff")
+                .setContentTitle("找茬助手")
+                .setContentText("录屏服务运行中")
+                .setSmallIcon(android.R.drawable.ic_menu_search)
+                .build()
+        } else {
+            @Suppress("DEPRECATION")
+            android.app.Notification.Builder(this)
+                .setContentTitle("找茬助手")
+                .setContentText("录屏服务运行中")
+                .setSmallIcon(android.R.drawable.ic_menu_search)
+                .build()
         }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopCapture()
+        floatingView?.let { windowManager?.removeView(it) }
     }
 }
