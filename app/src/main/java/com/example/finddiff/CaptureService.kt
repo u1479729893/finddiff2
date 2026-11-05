@@ -1,23 +1,24 @@
 package com.example.finddiff
 
+import android.app.Notification
 import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
-import android.media.projection.MediaProjection
+import android.media.MediaProjection
+import android.media.MediaProjectionManager
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
-import android.os.IBinder
 import android.util.DisplayMetrics
 import android.view.Gravity
-import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
@@ -26,74 +27,104 @@ import android.widget.Toast
 
 class CaptureService : Service() {
 
+    companion object {
+        private const val EXTRA_RESULT_CODE = "result_code"
+        private const val EXTRA_DATA = "data"
+
+        fun startService(context: Context, resultCode: Int, data: Intent) {
+            val intent = Intent(context, CaptureService::class.java)
+            intent.putExtra(EXTRA_RESULT_CODE, resultCode)
+            intent.putExtra(EXTRA_DATA, data)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
+    }
+
+    private lateinit var windowManager: WindowManager
+    private var floatingView: View? = null
+
+    private var mediaProjectionManager: MediaProjectionManager? = null
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
-    private var windowManager: WindowManager? = null
-    private var floatingView: View? = null
 
-    private lateinit var handler: Handler
     private lateinit var handlerThread: HandlerThread
+    private lateinit var handler: Handler
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    private val mediaProjectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            super.onStop()
+            stopCapture()
+            Toast.makeText(this@CaptureService, "录屏捕获已停止", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
 
-        handlerThread = HandlerThread("FindDiffCapture")
-        handlerThread.start()
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+        handlerThread = HandlerThread("FindDiffCapture").apply { start() }
         handler = Handler(handlerThread.looper)
 
+        mediaProjectionManager =
+            getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+
         startForeground(1, createNotification())
+    }
 
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        showFloatingButton()
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        intent ?: return START_NOT_STICKY
 
-        val resultCode = intent?.getIntExtra("resultCode", -1) ?: -1
-        val data = intent?.getParcelableExtra<Intent>("data")
+        val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, -1)
+        val data = intent.getParcelableExtra<Intent>(EXTRA_DATA)
 
         if (resultCode == -1 || data == null) {
-            Toast.makeText(this, "启动捕获失败：无录屏授权", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "启动捕获失败：录屏授权数据缺失", Toast.LENGTH_SHORT).show()
             stopSelf()
-            return
+            return START_NOT_STICKY
         }
 
-        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = mpm.getMediaProjection(resultCode, data)
+        try {
+            mediaProjection = mediaProjectionManager?.getMediaProjection(resultCode, data)
+            mediaProjection?.registerCallback(mediaProjectionCallback, handler)
 
-        startCapture()
+            startCapture()
+            showFloatingButton()
+            Toast.makeText(this, "捕获服务已启动", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "启动捕获失败：${e.message}", Toast.LENGTH_LONG).show()
+            stopSelf()
+        }
+
+        return START_STICKY
     }
 
     private fun showFloatingButton() {
-        val inflater = LayoutInflater.from(this)
-        floatingView = inflater.inflate(R.layout.floating_button, null)
-
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            else
-                WindowManager.LayoutParams.TYPE_PHONE,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            } else {
+                WindowManager.LayoutParams.TYPE_PHONE
+            },
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 100
-            y = 400
-        }
+        )
+        params.gravity = Gravity.TOP or Gravity.START
+        params.x = 300
+        params.y = 600
 
-        val btn = floatingView?.findViewById<TextView>(R.id.floating_btn)
-
-        btn?.setOnClickListener {
-            captureOnce()
-        }
-
-        btn?.setOnLongClickListener {
-            stopSelf()
-            Toast.makeText(this, "已关闭", Toast.LENGTH_SHORT).show()
-            true
+        floatingView = TextView(this).apply {
+            text = "找"
+            setTextColor(Color.WHITE)
+            textSize = 28f
+            setBackgroundResource(android.R.drawable.btn_default)
+            setPadding(40, 40, 40, 40)
         }
 
         var initialX = 0
@@ -101,7 +132,7 @@ class CaptureService : Service() {
         var initialTouchX = 0f
         var initialTouchY = 0f
 
-        btn?.setOnTouchListener { v, event ->
+        floatingView?.setOnTouchListener { v, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = params.x
@@ -113,30 +144,28 @@ class CaptureService : Service() {
                 MotionEvent.ACTION_MOVE -> {
                     params.x = initialX + (event.rawX - initialTouchX).toInt()
                     params.y = initialY + (event.rawY - initialTouchY).toInt()
-                    windowManager?.updateViewLayout(floatingView, params)
+                    windowManager.updateViewLayout(floatingView, params)
                     true
                 }
                 else -> false
             }
         }
 
-        windowManager?.addView(floatingView, params)
+        windowManager.addView(floatingView, params)
     }
 
     private fun startCapture() {
         val metrics = DisplayMetrics()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val dm = resources.displayMetrics
-            metrics.setTo(dm)
+            metrics.setTo(resources.displayMetrics)
         } else {
             @Suppress("DEPRECATION")
-            windowManager?.defaultDisplay?.getMetrics(metrics)
+            windowManager.defaultDisplay.getMetrics(metrics)
         }
 
         val width = metrics.widthPixels
         val height = metrics.heightPixels
 
-        // 1. 先创建 ImageReader
         imageReader = ImageReader.newInstance(
             width,
             height,
@@ -144,7 +173,6 @@ class CaptureService : Service() {
             2
         )
 
-        // 2. 关键：createVirtualDisplay 前必须先注册 callback
         imageReader?.setOnImageAvailableListener({ reader ->
             val image = reader.acquireLatestImage()
             if (image != null) {
@@ -152,7 +180,7 @@ class CaptureService : Service() {
                     val bitmap = imageToBitmap(image)
                     Toast.makeText(
                         this@CaptureService,
-                        "抓到画面 ${bitmap.width}x${bitmap.height}",
+                        "已抓到一帧：${bitmap.width}x${bitmap.height}",
                         Toast.LENGTH_SHORT
                     ).show()
                 } finally {
@@ -161,7 +189,6 @@ class CaptureService : Service() {
             }
         }, handler)
 
-        // 3. 再创建 VirtualDisplay，绑定 surface
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "FindDiffCapture",
             width,
@@ -174,14 +201,8 @@ class CaptureService : Service() {
         )
 
         if (virtualDisplay == null) {
-            Toast.makeText(this, "启动捕获失败：创建虚拟屏幕失败", Toast.LENGTH_SHORT).show()
-            stopSelf()
+            throw IllegalStateException("createVirtualDisplay 返回 null")
         }
-    }
-
-    private fun captureOnce() {
-        // 现在靠 ImageReader callback 自动收帧；这里只提示一下
-        Toast.makeText(this, "已触发抓帧，等一帧", Toast.LENGTH_SHORT).show()
     }
 
     private fun imageToBitmap(image: Image): Bitmap {
@@ -204,14 +225,17 @@ class CaptureService : Service() {
     private fun stopCapture() {
         virtualDisplay?.release()
         virtualDisplay = null
+
         imageReader?.close()
         imageReader = null
+
+        mediaProjection?.unregisterCallback(mediaProjectionCallback)
         mediaProjection?.stop()
         mediaProjection = null
     }
 
-    private fun createNotification() =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+    private fun createNotification(): Notification {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = android.app.NotificationChannel(
                 "finddiff",
                 "找茬助手",
@@ -220,24 +244,27 @@ class CaptureService : Service() {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
             nm.createNotificationChannel(channel)
 
-            android.app.Notification.Builder(this, "finddiff")
+            Notification.Builder(this, "finddiff")
                 .setContentTitle("找茬助手")
                 .setContentText("录屏服务运行中")
                 .setSmallIcon(android.R.drawable.ic_menu_search)
                 .build()
         } else {
             @Suppress("DEPRECATION")
-            android.app.Notification.Builder(this)
+            Notification.Builder(this)
                 .setContentTitle("找茬助手")
                 .setContentText("录屏服务运行中")
                 .setSmallIcon(android.R.drawable.ic_menu_search)
                 .build()
         }
+    }
 
     override fun onDestroy() {
         super.onDestroy()
         stopCapture()
-        floatingView?.let { windowManager?.removeView(it) }
+        floatingView?.let { windowManager.removeView(it) }
         handlerThread.quitSafely()
     }
+
+    override fun onBind(intent: Intent?) = null
 }
