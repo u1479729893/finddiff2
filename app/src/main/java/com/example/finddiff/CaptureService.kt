@@ -1,114 +1,78 @@
 package com.example.finddiff
 
 import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
-import android.media.Image
 import android.media.ImageReader
-import android.media.MediaProjection
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Handler
-import android.os.HandlerThread
+import android.os.IBinder
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.Gravity
-import android.view.MotionEvent
 import android.view.WindowManager
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.core.content.ContextCompat
+import androidx.core.app.NotificationCompat
 
 class CaptureService : Service() {
-
-    companion object {
-        private const val EXTRA_RESULT_CODE = "result_code"
-        private const val EXTRA_DATA = "data"
-
-        fun startService(context: Context, resultCode: Int, data: Intent) {
-            val intent = Intent(context, CaptureService::class.java).apply {
-                putExtra(EXTRA_RESULT_CODE, resultCode)
-                putExtra(EXTRA_DATA, data)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
-        }
-    }
-
-    private lateinit var windowManager: WindowManager
-    private var floatingView: View? = null
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
 
-    private lateinit var handlerThread: HandlerThread
-    private lateinit var handler: Handler
+    private lateinit var windowManager: WindowManager
+    private var overlayView: FrameLayout? = null
+    private var dotView: ImageView? = null
+    private var tipView: TextView? = null
 
-    private val mediaProjectionCallback = object : MediaProjection.Callback() {
-        override fun onStop() {
-            super.onStop()
-            stopCapture()
-            Toast.makeText(this@CaptureService, "录屏捕获已停止", Toast.LENGTH_SHORT).show()
+    private val handler = Handler(Looper.getMainLooper())
+    private val captureRunnable = object : Runnable {
+        override fun run() {
+            try {
+                grabFrame()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            handler.postDelayed(this, 1200)
         }
-    }
-
-    override fun onCreate() {
-        super.onCreate()
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        handlerThread = HandlerThread("FindDiffCapture").apply { start() }
-        handler = Handler(handlerThread.looper)
-        startForeground(1, createNotification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        intent ?: return START_NOT_STICKY
+        startForeground(1, createNotification())
+        showOverlay()
 
-        val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, -1)
-        val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getParcelableExtra(EXTRA_DATA, Intent::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent.getParcelableExtra(EXTRA_DATA)
-        }
+        val resultCode = intent?.getIntExtra("resultCode", -1) ?: -1
+        val data = intent?.getParcelableExtra<Intent>("data")
 
         if (resultCode == -1 || data == null) {
-            showError("启动失败：录屏授权数据缺失（MainActivity 没传过来）")
+            Toast.makeText(this, "启动失败：授权数据缺失", Toast.LENGTH_SHORT).show()
             stopSelf()
             return START_NOT_STICKY
         }
 
-        try {
-            // 关键：先拿 MediaProjection
-            mediaProjection = (getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager)
-                .getMediaProjection(resultCode, data)
+        mediaProjection = (getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager)
+            .getMediaProjection(resultCode, data)
 
-            if (mediaProjection == null) {
-                showError("getMediaProjection 返回 null")
-                stopSelf()
-                return START_NOT_STICKY
-            }
-
-            // 关键：注册 callback
-            mediaProjection?.registerCallback(mediaProjectionCallback, handler)
-
-            startCapture()
-            showFloatingButton()
-        } catch (e: Exception) {
-            showError("启动异常：\n${e.javaClass.simpleName}\n${e.message}")
-            stopSelf()
-        }
+        setupVirtualDisplay()
+        handler.post(captureRunnable)
+        Toast.makeText(this, "找茬识别已启动", Toast.LENGTH_SHORT).show()
 
         return START_STICKY
     }
 
-    private fun startCapture() {
+    private fun setupVirtualDisplay() {
         val metrics = DisplayMetrics()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             metrics.setTo(resources.displayMetrics)
@@ -120,165 +84,161 @@ class CaptureService : Service() {
         val width = metrics.widthPixels
         val height = metrics.heightPixels
 
-        // 创建 ImageReader
         imageReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
 
-        // 注册 ImageReader 回调
-        imageReader?.setOnImageAvailableListener({ reader ->
-            val image = reader.acquireLatestImage()
-            if (image != null) {
-                try {
-                    val bitmap = imageToBitmap(image)
-                    Toast.makeText(
-                        this@CaptureService,
-                        "已抓到一帧：${bitmap.width}x${bitmap.height}",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                } finally {
-                    image.close()
-                }
-            }
-        }, handler)
+        virtualDisplay = mediaProjection?.createVirtualDisplay(
+            "FindDiff",
+            width,
+            height,
+            metrics.densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            imageReader?.surface,
+            null,
+            null
+        )
+    }
 
-        // 创建虚拟屏 —— 原报错就在这儿
+    private fun grabFrame() {
+        val reader = imageReader ?: return
+        val image = reader.acquireLatestImage() ?: return
+
         try {
-            virtualDisplay = mediaProjection?.createVirtualDisplay(
-                "FindDiffCapture",
-                width,
-                height,
-                metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader?.surface,
-                null,
-                handler
+            val planes = image.planes
+            val buffer = planes[0].buffer
+            val pixelStride = planes[0].pixelStride
+            val rowStride = planes[0].rowStride
+            val rowPadding = rowStride - pixelStride * image.width
+
+            val bitmap = Bitmap.createBitmap(
+                image.width + rowPadding / pixelStride,
+                image.height,
+                Bitmap.Config.ARGB_8888
             )
-        } catch (e: Exception) {
-            showError("createVirtualDisplay 炸了：\n${e.javaClass.simpleName}\n${e.message}")
-            return
-        }
+            bitmap.copyPixelsFromBuffer(buffer)
 
-        if (virtualDisplay == null) {
-            showError("createVirtualDisplay 返回 null（没抛异常但没成功）")
-            return
-        }
+            val real = Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
+            bitmap.recycle()
 
-        Toast.makeText(this, "捕获服务启动成功", Toast.LENGTH_SHORT).show()
+            val diff = findDiff(real)
+            if (diff != null) {
+                markDot(diff.first, diff.second)
+            } else {
+                clearDot()
+            }
+
+            real.recycle()
+        } finally {
+            image.close()
+        }
     }
 
-    private fun showFloatingButton() {
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            } else {
-                @Suppress("DEPRECATION")
-                WindowManager.LayoutParams.TYPE_PHONE
-            },
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
-        )
-        params.gravity = Gravity.TOP or Gravity.START
-        params.x = 300
-        params.y = 600
+    private fun findDiff(bitmap: Bitmap): Pair<Int, Int>? {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w < 200 || h < 200) return null
 
-        floatingView = TextView(this).apply {
-            text = "找"
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 28f
-            setBackgroundResource(android.R.drawable.btn_default)
-            setPadding(40, 40, 40, 40)
-        }
+        val leftW = w / 2 - 20
+        val rightX = w / 2 + 20
+        val step = 24
+        var bestX = -1
+        var bestY = -1
+        var maxDiff = 0
 
-        var initialX = 0
-        var initialY = 0
-        var initialTouchX = 0f
-        var initialTouchY = 0f
-
-        floatingView?.setOnTouchListener { _, event ->
-            when (event.action) {
-                MotionEvent.ACTION_DOWN -> {
-                    initialX = params.x
-                    initialY = params.y
-                    initialTouchX = event.rawX
-                    initialTouchY = event.rawY
-                    true
+        for (y in 80 until h - 80 step step) {
+            for (x in 80 until leftW step step) {
+                val c1 = bitmap.getPixel(x, y)
+                val c2 = bitmap.getPixel(rightX + (x - 80), y)
+                val d = colorDistance(c1, c2)
+                if (d > maxDiff) {
+                    maxDiff = d
+                    bestX = x
+                    bestY = y
                 }
-                MotionEvent.ACTION_MOVE -> {
-                    params.x = initialX + (event.rawX - initialTouchX).toInt()
-                    params.y = initialY + (event.rawY - initialTouchY).toInt()
-                    windowManager.updateViewLayout(floatingView, params)
-                    true
-                }
-                else -> false
             }
         }
 
-        windowManager.addView(floatingView, params)
+        return if (maxDiff > 45) Pair(bestX, bestY) else null
     }
 
-    private fun imageToBitmap(image: Image): Bitmap {
-        val plane = image.planes[0]
-        val buffer = plane.buffer
-        val pixelStride = plane.pixelStride
-        val rowStride = plane.rowStride
-        val rowPadding = rowStride - pixelStride * image.width
-
-        val bitmap = Bitmap.createBitmap(
-            image.width + rowPadding / pixelStride,
-            image.height,
-            Bitmap.Config.ARGB_8888
-        )
-        bitmap.copyPixelsFromBuffer(buffer)
-        return Bitmap.createBitmap(bitmap, 0, 0, image.width, image.height)
+    private fun colorDistance(c1: Int, c2: Int): Int {
+        val r1 = Color.red(c1); val g1 = Color.green(c1); val b1 = Color.blue(c1)
+        val r2 = Color.red(c2); val g2 = Color.green(c2); val b2 = Color.blue(c2)
+        return kotlin.math.abs(r1 - r2) + kotlin.math.abs(g1 - g2) + kotlin.math.abs(b1 - b2)
     }
 
-    private fun stopCapture() {
-        virtualDisplay?.release()
-        virtualDisplay = null
-        imageReader?.close()
-        imageReader = null
-        mediaProjection?.unregisterCallback(mediaProjectionCallback)
-        mediaProjection?.stop()
-        mediaProjection = null
+    private fun showOverlay() {
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+            else
+                WindowManager.LayoutParams.TYPE_PHONE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply { gravity = Gravity.TOP or Gravity.START }
+
+        overlayView = FrameLayout(this)
+        dotView = ImageView(this).apply {
+            setImageResource(android.R.drawable.presence_online)
+            alpha = 0f
+        }
+        tipView = TextView(this).apply {
+            text = "识别中..."
+            setTextColor(Color.YELLOW)
+            textSize = 16f
+            alpha = 0.8f
+        }
+
+        overlayView?.addView(dotView)
+        overlayView?.addView(tipView)
+        windowManager.addView(overlayView, params)
     }
 
-    private fun showError(msg: String) {
-        // 用 Toast 兜底，同时打印到 logcat
-        Toast.makeText(this, "启动失败：$msg", Toast.LENGTH_LONG).show()
-        android.util.Log.e("FindDiff", msg)
+    private fun markDot(x: Int, y: Int) {
+        dotView?.let {
+            it.x = x.toFloat() - 24
+            it.y = y.toFloat() - 24
+            it.alpha = 1f
+        }
+        tipView?.let {
+            it.text = "差异点：$x,$y"
+            it.x = x.toFloat() + 20
+            it.y = y.toFloat() - 40
+        }
+    }
+
+    private fun clearDot() {
+        dotView?.alpha = 0f
+        tipView?.text = "识别中..."
     }
 
     private fun createNotification(): Notification {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = android.app.NotificationChannel(
-                "finddiff",
-                "找茬助手",
-                android.app.NotificationManager.IMPORTANCE_LOW
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            nm.createNotificationChannel(
+                NotificationChannel("finddiff", "找茬助手", NotificationManager.IMPORTANCE_LOW)
             )
-            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
-            nm.createNotificationChannel(channel)
-            Notification.Builder(this, "finddiff")
-                .setContentTitle("找茬助手")
-                .setContentText("录屏服务运行中")
-                .setSmallIcon(android.R.drawable.ic_menu_search)
-                .build()
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-                .setContentTitle("找茬助手")
-                .setContentText("录屏服务运行中")
-                .setSmallIcon(android.R.drawable.ic_menu_search)
-                .build()
         }
+        return NotificationCompat.Builder(this, "finddiff")
+            .setContentTitle("找茬助手运行中")
+            .setContentText("返回游戏界面，等待识别标记")
+            .setSmallIcon(android.R.drawable.ic_menu_search)
+            .build()
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(captureRunnable)
+        virtualDisplay?.release()
+        imageReader?.close()
+        mediaProjection?.stop()
+        overlayView?.let { windowManager.removeView(it) }
         super.onDestroy()
-        stopCapture()
-        floatingView?.let { windowManager.removeView(it) }
-        handlerThread.quitSafely()
     }
 
-    override fun onBind(intent: Intent?) = null
+    override fun onBind(intent: Intent?): IBinder? = null
 }
