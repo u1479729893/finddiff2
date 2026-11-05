@@ -104,6 +104,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: |
-            project_src/${{ steps.root.outputs.root }}/**/build/outputs/apk/debug/*.apk
-            project_src/${{ steps.root.outputs.root }}/**/build/outputs/apk/*/debug/*.apk
+          path: project_src/${{ steps.root.outputs.root }}/app/build/outputs/apk/debug/app-debug.apk
