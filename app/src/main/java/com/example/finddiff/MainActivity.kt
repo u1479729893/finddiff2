@@ -1,6 +1,5 @@
 package com.example.finddiff
 
-import android.app.Activity
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -16,7 +15,7 @@ class MainActivity : AppCompatActivity() {
 
     private val captureLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            if (result.resultCode == RESULT_OK && result.data != null) {
                 try {
                     val intent = Intent(this, CaptureService::class.java)
                     intent.putExtra("resultCode", result.resultCode)
