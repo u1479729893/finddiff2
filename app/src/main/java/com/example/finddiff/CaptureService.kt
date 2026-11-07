@@ -28,10 +28,19 @@ class CaptureService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent == null) return START_NOT_STICKY
+        if (intent == null) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         val resultCode = intent.getIntExtra("resultCode", -1)
-        val data = intent.getParcelableExtra<Intent>("data")
+
+        val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra("data", Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra("data")
+        }
 
         if (resultCode == -1 || data == null) {
             Log.e(TAG, "授权数据缺失")
@@ -42,10 +51,6 @@ class CaptureService : Service() {
         try {
             mediaProjection = mpm.getMediaProjection(resultCode, data)
             Log.d(TAG, "MediaProjection 创建成功")
-
-            // TODO: 这里接 ImageReader / 截屏 / 找茬逻辑
-            // 现在先只保持前台服务运行
-
         } catch (e: Exception) {
             Log.e(TAG, "MediaProjection 失败: ${e.message}")
             stopSelf()
