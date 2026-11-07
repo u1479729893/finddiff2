@@ -9,32 +9,37 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
-import android.util.Log
+import androidx.core.app.ServiceCompat
 
 class CaptureService : Service() {
 
-    private val TAG = "CaptureService"
     private val NOTIFY_ID = 1
     private val CHANNEL_ID = "finddiff_channel"
-
     private lateinit var mpm: MediaProjectionManager
     private var mediaProjection: MediaProjection? = null
 
     override fun onCreate() {
         super.onCreate()
         mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        createNotificationChannel()
-        startForeground(NOTIFY_ID, buildNotification())
+        createChannel()
+        val notify = buildNotification("初始化中")
+        ServiceCompat.startForeground(
+            this,
+            NOTIFY_ID,
+            notify,
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            else 0
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
-            stopSelf()
+            cleanStop()
             return START_NOT_STICKY
         }
 
         val resultCode = intent.getIntExtra("resultCode", -1)
-
         val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent.getParcelableExtra("data", Intent::class.java)
         } else {
@@ -43,52 +48,55 @@ class CaptureService : Service() {
         }
 
         if (resultCode == -1 || data == null) {
-            Log.e(TAG, "授权数据缺失")
-            stopSelf()
+            updateNotification("授权数据缺失，已停止")
+            cleanStop()
             return START_NOT_STICKY
         }
 
         try {
             mediaProjection = mpm.getMediaProjection(resultCode, data)
-            Log.d(TAG, "MediaProjection 创建成功")
+            updateNotification("录屏已连接，回游戏")
         } catch (e: Exception) {
-            Log.e(TAG, "MediaProjection 失败: ${e.message}")
-            stopSelf()
+            updateNotification("MediaProjection 失败：${e.message}")
+            cleanStop()
         }
-
         return START_NOT_STICKY
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
+    private fun cleanStop() {
         mediaProjection?.stop()
+        mediaProjection = null
         stopForeground(true)
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        mediaProjection?.stop()
+        super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun createNotificationChannel() {
+    private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "找茬识别",
+            val ch = NotificationChannel(
+                CHANNEL_ID, "找茬识别",
                 NotificationManager.IMPORTANCE_LOW
             )
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.createNotificationChannel(channel)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
         }
     }
 
-    private fun buildNotification(): Notification {
-        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-        } else {
-            Notification.Builder(this)
-        }
-        return builder
-            .setContentTitle("找茬识别运行中")
-            .setContentText("返回游戏即可使用")
+    private fun buildNotification(text: String): Notification {
+        return Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("找茬识别")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_menu_search)
             .build()
+    }
+
+    private fun updateNotification(text: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(NOTIFY_ID, buildNotification(text))
     }
 }
