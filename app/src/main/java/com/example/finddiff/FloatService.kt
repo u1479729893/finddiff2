@@ -56,13 +56,9 @@ class FloatService : Service() {
         resultIv = ImageView(this).apply { visibility = View.GONE }
         wm.addView(resultIv, ivLp)
 
-        val findBtn = btn?.findViewById<Button>(R.id.btnFind)
-        if (findBtn != null) {
-            findBtn.setOnClickListener {
-                handler.postDelayed({
-                    resultIv?.visibility = View.GONE
-                }, 2000)
-            }
+        val findBtn = btn?.findViewById<Button>(R.id.btnStart)
+        findBtn?.setOnClickListener {
+            handler.postDelayed({ resultIv?.visibility = View.GONE }, 2000)
         }
     }
 
