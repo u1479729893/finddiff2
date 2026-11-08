@@ -57,7 +57,7 @@ jobs:
 
       - name: Build debug APK
         working-directory: ${{ steps.gw.outputs.root }}
-        timeout-minutes: 25
+        timeout-minutes: 30
         run: |
           ./gradlew --no-daemon --refresh-dependencies --stacktrace assembleDebug
 
