@@ -2,16 +2,20 @@ name: Build Debug APK
 
 on:
   push:
-    branches: ["*"]
+    branches:
+      - main
   pull_request:
-    branches: ["*"]
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: write
 
 jobs:
   build:
+    name: Build debug
     runs-on: ubuntu-latest
-
-    env:
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
       - name: Checkout
@@ -22,68 +26,48 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-
-      - name: Install Android SDK manually
-        run: |
-          SDK=$ANDROID_SDK_ROOT
-          CMDLINE=$SDK/cmdline-tools/latest/bin/sdkmanager
-
-          echo "=== Accept all SDK licenses ==="
-          yes | $CMDLINE --licenses || true
-
-          echo "=== Install only required packages ==="
-          yes | $CMDLINE \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
-            "platform-tools" || true
-
-          echo "=== Installed packages ==="
-          $CMDLINE --list_installed || true
-
-          echo "$SDK/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
-          echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
+          cache: gradle
 
       - name: Find gradlew
         id: gw
         run: |
-          echo "Searching for gradlew..."
-          GW=$(find . -maxdepth 5 -name gradlew -type f | head -n 1)
-
+          GW=$(find . -maxdepth 5 -name gradlew | head -n 1)
           if [ -z "$GW" ]; then
             echo "ERROR: gradlew not found!"
             echo "Repo tree:"
-            ls -R | head -n 200
+            ls -R | head -n 300
             exit 1
           fi
 
           ROOT=$(dirname "$GW")
           echo "Found gradlew at: $GW"
           echo "Project root: $ROOT"
+
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "gw=$GW" >> "$GITHUB_OUTPUT"
 
-          chmod +x "$GW"
-          chmod +x "$ROOT/gradle/wrapper/gradle-wrapper.jar" || true
-- name: Clean gradle cache
-  run: |
-    rm -rf ~/.gradle/caches ~/.gradle/wrapper || true
+      - name: Prepare gradlew permissions
+        run: |
+          chmod +x "${{ steps.gw.outputs.gw }}"
+          chmod +x "${{ steps.gw.outputs.root }}/gradle/wrapper/gradle-wrapper.jar" || true
 
-- name: Build debug APK
-  working-directory: ${{ steps.gw.outputs.root }}
-  timeout-minutes: 20
-  run: |
-    chmod +x gradlew
-    chmod +x gradle/wrapper/gradle-wrapper.jar || true
-    ./gradlew --no-daemon --refresh-dependencies --stacktrace assembleDebug
+      - name: Clean gradle cache
+        run: |
+          rm -rf ~/.gradle/caches ~/.gradle/wrapper || true
 
-- name: List outputs
-  run: |
-    echo "ROOT=${{ steps.gw.outputs.root }}"
-    find "${{ steps.gw.outputs.root }}" -name "*.apk" -o -name "*.aab"
+      - name: Build debug APK
+        working-directory: ${{ steps.gw.outputs.root }}
+        timeout-minutes: 25
+        run: |
+          ./gradlew --no-daemon --refresh-dependencies --stacktrace assembleDebug
 
-- name: Upload APK
-  uses: actions/upload-artifact@v4
-  with:
-    name: app-debug
-    path: ${{ steps.gw.outputs.root }}/app/build/outputs/apk/debug/app-debug.apk
+      - name: List outputs
+        run: |
+          echo "ROOT=${{ steps.gw.outputs.root }}"
+          find "${{ steps.gw.outputs.root }}" -name "*.apk" -o -name "*.aab" -ls
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: ${{ steps.gw.outputs.root }}/app/build/outputs/apk/debug/app-debug.apk
